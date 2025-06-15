@@ -14,62 +14,69 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Предкомпилированные шаблоны для разных форматов паспортов
-PASSPORT_PATTERNS = [
-    re.compile(r'([A-Z0-9<]+)\s*([A-Z0-9<]+)\s*([A-Z0-9<]+).*?([A-Z]{2,3})\s*(\d{2}[A-Z]{3}\d{2})\s*([FM])\s*(\d{2}[A-Z]{3}\d{2})\s*([A-Z<]+)\s*([A-Z<]+)'),
-    re.compile(r'([A-Z0-9<]+)([A-Z0-9<]+)([A-Z0-9<]+).*?([A-Z]{2,3})(\d{2}[A-Z]{3}\d{2})([FM])(\d{2}[A-Z]{3}\d{2})([A-Z<]+)([A-Z<]+)'),
-    re.compile(r'([A-Z]{1}[A-Z0-9<]{1,9})\s*([A-Z0-9<]{1,9})\s*([A-Z0-9<]{1,14}).*?([A-Z]{2,3})\s*(\d{2}[A-Z]{3}\d{2})\s*([FM])\s*(\d{2}[A-Z]{3}\d{2})\s*([A-Z<]{1,28})\s*([A-Z<]+)')
+# Шаблоны для узбекских паспортов
+UZ_PASSPORT_PATTERNS = [
+    re.compile(r'P<([A-Z]{3})([A-Z<]+)<<([A-Z<]+)<([A-Z<]+)<<*'),
+    re.compile(r'([A-Z0-9<]{9})([0-9]{1})([A-Z]{3})([0-9]{6})([MF])([0-9]{6})')
 ]
 
-def preprocess_image(image_bytes):
-    """Улучшенная предобработка изображения"""
-    try:
-        img_array = np.frombuffer(image_bytes.getvalue(), dtype=np.uint8)
-        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-        
-        # Конвертация в grayscale
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        
-        # Увеличение контраста
-        gray = cv2.convertScaleAbs(gray, alpha=1.5, beta=40)
-        
-        # Бинаризация
-        gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-        
-        # Удаление шума
-        gray = cv2.medianBlur(gray, 3)
-        
-        return gray
-    except Exception as e:
-        logger.error(f"Ошибка обработки изображения: {str(e)}")
-        raise ValueError("Ошибка обработки изображения")
-
-def extract_passport_data(text):
-    """Улучшенное извлечение данных с проверкой форматов"""
-    clean_text = text.replace('\n', ' ').replace('  ', ' ')
+def find_mrz_zone(image):
+    """Автоматическое обнаружение машиносчитываемой зоны"""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     
-    for pattern in PASSPORT_PATTERNS:
-        match = pattern.search(clean_text)
-        if match:
-            # Дополнительная проверка валидности данных
-            if (len(match.group(5)) == 7 and len(match.group(7)) == 7:
-                return match
+    # Ищем контуры текстовых блоков
+    contours, _ = cv2.findContours(binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
     
-    logger.warning(f"Не распознан текст: {clean_text}")
-    return None
+    for cnt in sorted(contours, key=cv2.contourArea, reverse=True)[:5]:
+        x, y, w, h = cv2.boundingRect(cnt)
+        roi = image[y:y+h, x:x+w]
+        text = pytesseract.image_to_string(roi, config='--psm 6')
+        
+        if "P<" in text and len(text.split('\n')) >= 2:
+            return roi
+    
+    # Если не нашли, возвращаем нижнюю часть изображения
+    return image[-150:]
 
-def format_amadeus(data):
-    """Форматирование результата для Amadeus"""
-    try:
-        return (
-            f"SR DOCS YY HK1-P-{data.group(2)}-{data.group(3)}-"
-            f"{data.group(4)}-{data.group(5)}-{data.group(6)}-"
-            f"{data.group(7)}-{data.group(8).replace('<', '')}-"
-            f"{data.group(9).replace('<', ' ').strip()}"
-        )
-    except Exception as e:
-        logger.error(f"Ошибка форматирования: {str(e)}")
-        raise ValueError("Ошибка формирования результата")
+def preprocess_for_mrz(image):
+    """Специальная обработка для MRZ"""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+    return gray
+
+def parse_uzbek_passport(text):
+    """Парсинг specifically для узбекских паспортов"""
+    lines = [line for line in text.split('\n') if len(line) > 10]
+    
+    if len(lines) < 2:
+        return None
+    
+    # Первая строка MRZ
+    line1 = lines[0].replace(' ', '')
+    # Вторая строка MRZ
+    line2 = lines[1].replace(' ', '')
+    
+    # Парсим первую строку
+    m1 = UZ_PASSPORT_PATTERNS[0].search(line1)
+    if not m1:
+        return None
+    
+    # Парсим вторую строку
+    m2 = UZ_PASSPORT_PATTERNS[1].search(line2)
+    if not m2:
+        return None
+    
+    return {
+        'country_code': m1.group(1),
+        'surname': m1.group(2).replace('<', ' ').strip(),
+        'given_names': m1.group(3).replace('<', ' ').strip(),
+        'passport_number': m2.group(1),
+        'birth_date': f"{m2.group(4)[4:6]}{m2.group(4)[2:4]}{m2.group(4)[0:2]}",
+        'sex': 'F' if m2.group(5) == 'F' else 'M',
+        'expiry_date': f"{m2.group(6)[4:6]}{m2.group(6)[2:4]}{m2.group(6)[0:2]}"
+    }
 
 async def process_photo(update: Update, context: CallbackContext):
     try:
@@ -79,87 +86,71 @@ async def process_photo(update: Update, context: CallbackContext):
         await photo_file.download(out=img_bytes)
         img_bytes.seek(0)
         
-        # Обработка изображения
-        processed_img = preprocess_image(img_bytes)
+        # Конвертируем в OpenCV формат
+        img_array = np.frombuffer(img_bytes.getvalue(), dtype=np.uint8)
+        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
         
-        # Распознавание текста с разными параметрами
-        text = ""
-        for config in ['--psm 6', '--psm 11']:
-            text = pytesseract.image_to_string(
-                processed_img,
-                lang='eng+rus',
-                config=f'{config} -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<'
-            )
-            if any(c.isalpha() for c in text):
-                break
+        # Находим MRZ зону
+        mrz_zone = find_mrz_zone(img)
+        processed = preprocess_for_mrz(mrz_zone)
         
-        logger.info(f"Распознанный текст: {text}")
+        # Распознаем текст
+        text = pytesseract.image_to_string(
+            processed,
+            lang='eng',
+            config='--psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<'
+        )
         
-        if not any(c.isalpha() for c in text):
-            raise ValueError("Не удалось распознать текст")
-            
-        # Извлечение данных
-        data = extract_passport_data(text)
+        logger.info(f"Распознанный MRZ:\n{text}")
+        
+        # Парсим данные
+        data = parse_uzbek_passport(text)
         if not data:
-            raise ValueError("Не найдены паспортные данные")
-            
-        # Форматирование результата
-        result = format_amadeus(data)
+            raise ValueError("Не удалось распознать данные паспорта")
         
-        await update.message.reply_text(f"✅ Результат:\n\n`{result}`", parse_mode='MarkdownV2')
+        # Форматируем для Amadeus
+        result = (
+            f"SR DOCS YY HK1-P-{data['country_code']}-{data['passport_number']}-"
+            f"{data['country_code']}-{data['birth_date']}-{data['sex']}-"
+            f"{data['expiry_date']}-{data['surname']}-{data['given_names']}"
+        )
+        
+        await update.message.reply_text(f"✅ Успешно распознано:\n\n`{result}`", parse_mode='MarkdownV2')
 
     except Exception as e:
-        logger.error(f"Ошибка обработки: {str(e)}")
-        
-        # Сохраняем проблемное фото для анализа
-        try:
-            with open("last_error_photo.jpg", "wb") as f:
-                f.write(img_bytes.getvalue())
-        except:
-            pass
-        
+        logger.error(f"Ошибка: {str(e)}")
         await update.message.reply_text(
-            "❌ Не удалось обработать фото. Пожалуйста:\n"
-            "1. Убедитесь, что фото содержит ТОЛЬКО 2 строки паспорта\n"
-            "2. Текст должен быть четким и горизонтальным\n"
-            "3. Попробуйте сделать фото при лучшем освещении\n\n"
+            "❌ Не удалось обработать паспорт. Пожалуйста:\n"
+            "1. Сфотографируйте ТОЛЬКО нижнюю часть страницы с 2 строками\n"
+            "2. Убедитесь, что текст четко виден\n"
+            "3. Отправьте фото еще раз\n\n"
             "Пример правильного фото:\n"
-            "P<UZBFA0421711<1111111M1111111<<<<<<<<<<<<<<<0\n"
-            "IBRAGIMOVA<<BARNO<BAKTIYAROVNA<<<<<<<<<<<<<<\n\n"
-            "Отправьте /help для подробной инструкции"
+            "P<UZBANVARJONOV<<BOBURJON<SARVAROVICH<<<<<<<<\n"
+            "FB11488013UZB1505122M30052135120515657003468"
         )
 
-async def help_command(update: Update, context: CallbackContext):
-    help_text = (
-        "📘 Инструкция по использованию:\n\n"
-        "1. Сфотографируйте ТОЛЬКО 2 строки машиносчитываемой зоны паспорта\n"
-        "2. Убедитесь, что:\n"
-        "   - Весь текст четко виден\n"
-        "   - Нет бликов и теней\n"
-        "   - Фото сделано прямо, без наклона\n"
-        "3. Отправьте фото боту\n\n"
+async def send_instructions(update: Update, context: CallbackContext):
+    instructions = (
+        "📘 Инструкция для узбекских паспортов:\n\n"
+        "1. Откройте страницу с фото\n"
+        "2. Сфотографируйте ТОЛЬКО нижнюю часть с 2 строками\n"
+        "3. Убедитесь, что текст четкий и не обрезан\n\n"
         "Пример правильного фото:\n"
-        "P<UZBFA0421711<1111111M1111111<<<<<<<<<<<<<<<0\n"
-        "IBRAGIMOVA<<BARNO<BAKTIYAROVNA<<<<<<<<<<<<<<\n\n"
-        "Если бот не распознает данные, попробуйте:\n"
-        "- Перефотографировать при другом освещении\n"
-        -"Обрезать лишние части фото\n"
-        -"Отправить фото еще раз"
+        "P<UZBANVARJONOV<<BOBURJON<SARVAROVICH<<<<<<<<\n"
+        "FB11488013UZB1505122M30052135120515657003468\n\n"
+        "Отправьте фото паспорта сейчас"
     )
-    await update.message.reply_text(help_text)
+    await update.message.reply_text(instructions)
 
 def main():
-    # Инициализация бота с вашим токеном
     application = Updater("7921805686:AAH0AJrCC0Dd6Lvb5mc3CXI9dUda_n89Y0Y")
     
-    # Обработчики команд
-    application.add_handler(CommandHandler("start", help_command))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(MessageHandler(Filters.PHOTO, process_photo))
+    application.add_handler(CommandHandler("start", send_instructions))
+    application.add_handler(CommandHandler("help", send_instructions))
+    application.add_handler(MessageHandler(Filters.photo, process_photo))
     
-    # Запуск бота
     application.start_polling()
-    logger.info("Бот запущен в улучшенном режиме!")
+    logger.info("Бот для узбекских паспортов запущен!")
     application.idle()
 
 if __name__ == '__main__':
