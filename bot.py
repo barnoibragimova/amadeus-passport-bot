@@ -16,47 +16,35 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def enhance_image(image):
-    """Улучшение качества изображения для лучшего распознавания"""
-    # Конвертация в grayscale
+    """Улучшение качества изображения"""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    
-    # Увеличение контраста
-    gray = cv2.convertScaleAbs(gray, alpha=1.5, beta=40)
-    
-    # Бинаризация
     gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
-    
-    # Удаление шума
     gray = cv2.medianBlur(gray, 3)
-    
     return gray
 
 def extract_passport_data(text):
-    """Извлечение данных паспорта из текста"""
+    """Извлечение данных паспорта с несколькими шаблонами"""
     patterns = [
-        # Основной шаблон для машиносчитываемой зоны
         r'([A-Z0-9<]+)\s+([A-Z0-9<]+)\s+([A-Z0-9<]+).*?([A-Z]{3})\s+(\d{2}[A-Z]{3}\d{2})\s+([FM])\s+(\d{2}[A-Z]{3}\d{2})\s+([A-Z<]+)\s+([A-Z<]+)',
-        
-        # Альтернативный шаблон для случаев с меньшим количеством пробелов
         r'([A-Z0-9<]+)([A-Z0-9<]+)([A-Z0-9<]+).*?([A-Z]{3})(\d{2}[A-Z]{3}\d{2})([FM])(\d{2}[A-Z]{3}\d{2})([A-Z<]+)([A-Z<]+)'
     ]
     
     for pattern in patterns:
-        match = re.search(pattern, text)
+        match = re.search(pattern, text.replace('\n', ' '))
         if match:
             return match
     return None
 
 def start(update: Update, context: CallbackContext):
     help_text = (
-        "📄 Отправьте мне ФОТО последних двух строк паспорта. Я преобразую их в формат AMADEUS.\n\n"
-        "Требования к фото:\n"
-        "- Хорошее освещение\n"
-        "- Четкий текст\n"
-        "- Только машиносчитываемая зона (2 строки)\n\n"
-        "Пример:\n"
+        "🛂 Отправьте фото двух строк машиносчитываемой зоны паспорта.\n\n"
+        "Пример правильного фото:\n"
         "P<UZBFA0421711<1111111M1111111<<<<<<<<<<<<<<<0\n"
-        "IBRAGIMOVA<<BARNO<BAKTIYAROVNA<<<<<<<<<<<<<<"
+        "IBRAGIMOVA<<BARNO<BAKTIYAROVNA<<<<<<<<<<<<<<\n\n"
+        "Требования:\n"
+        "- Хорошее освещение\n"
+        -"Четкий текст\n"
+        -"Только 2 строки паспорта"
     )
     update.message.reply_text(help_text)
 
@@ -68,78 +56,57 @@ def process_photo(update: Update, context: CallbackContext):
         photo_file.download(out=img_bytes)
         img_bytes.seek(0)
         
-        # Преобразуем в OpenCV формат
+        # Обработка изображения
         image = Image.open(img_bytes)
         img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-        
-        # Улучшаем качество изображения
         processed_img = enhance_image(img_cv)
         
-        # Распознаем текст
+        # Распознавание текста
         text = pytesseract.image_to_string(
-            processed_img,
+            processed_img, 
             lang='eng+rus',
-            config='--psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789< '
+            config='--psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<'
         )
         
-        logger.info(f"Распознанный текст:\n{text}")
+        logger.info(f"Распознанный текст: {text}")
         
         if not text:
-            raise ValueError("Не удалось распознать текст на фото")
-
-        # Ищем данные паспорта
-        passport_data = extract_passport_data(text.replace('\n', ' '))
-        
-        if not passport_data:
-            raise ValueError("Не удалось найти паспортные данные в распознанном тексте")
+            raise ValueError("Текст не распознан")
             
-        # Форматируем для Amadeus
-        country = passport_data.group(2)
-        passport_num = passport_data.group(3)
-        birth_date = passport_data.group(5)
-        gender = passport_data.group(6)
-        expiry_date = passport_data.group(7)
-        last_name = passport_data.group(8).replace('<', '')
-        first_name = passport_data.group(9).replace('<', ' ').strip()
-
+        # Извлечение данных
+        data = extract_passport_data(text)
+        if not data:
+            raise ValueError("Не найдены паспортные данные")
+            
+        # Форматирование результата
         result = (
-            f"SR DOCS YY HK1-P-{country}-{passport_num}-"
-            f"{country}-{birth_date}-{gender}-"
-            f"{expiry_date}-{last_name}-{first_name}"
+            f"SR DOCS YY HK1-P-{data.group(2)}-{data.group(3)}-"
+            f"{data.group(4)}-{data.group(5)}-{data.group(6)}-"
+            f"{data.group(7)}-{data.group(8).replace('<', '')}-"
+            f"{data.group(9).replace('<', ' ').strip()}"
         )
         
-        update.message.reply_text(f"✅ Готово! Скопируйте:\n\n`{result}`", parse_mode='MarkdownV2')
+        update.message.reply_text(f"✅ Результат:\n\n`{result}`", parse_mode='MarkdownV2')
 
     except Exception as e:
-        logger.error(f"Ошибка обработки фото: {str(e)}")
-        
-        error_help = (
-            "❌ Не удалось обработать фото. Пожалуйста:\n"
-            "1. Убедитесь, что фото четкое и хорошо освещено\n"
-            "2. На фото должны быть видны только 2 строки паспорта\n"
-            "3. Попробуйте сделать фото под прямым углом\n\n"
-            "Пример правильного фото:\n"
-            "P<UZBFA0421711<1111111M1111111<<<<<<<<<<<<<<<0\n"
-            "IBRAGIMOVA<<BARNO<BAKTIYAROVNA<<<<<<<<<<<<<<"
+        logger.error(f"Ошибка: {str(e)}")
+        update.message.reply_text(
+            "❌ Ошибка обработки. Пожалуйста:\n"
+            "1. Убедитесь, что фото четкое\n"
+            "2. Видны только 2 строки паспорта\n"
+            "3. Нет бликов и теней\n\n"
+            "Попробуйте еще раз или отправьте /start для инструкций"
         )
-        
-        update.message.reply_text(error_help)
-
-def error_handler(update: Update, context: CallbackContext):
-    logger.error(f"Ошибка в обработчике: {context.error}")
-    if update.message:
-        update.message.reply_text("⚠️ Произошла внутренняя ошибка. Пожалуйста, попробуйте позже.")
 
 def main():
-    updater = Updater("YOUR_TELEGRAM_TOKEN", use_context=True)
+    updater = Updater("7921805686:AAH0AJrCC0Dd6Lvb5mc3CXI9dUda_n89Y0Y", use_context=True)
     dp = updater.dispatcher
 
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(MessageHandler(Filters.photo, process_photo))
-    dp.add_error_handler(error_handler)
 
     updater.start_polling()
-    logger.info("Бот успешно запущен!")
+    logger.info("Бот запущен и готов к работе!")
     updater.idle()
 
 if __name__ == '__main__':
