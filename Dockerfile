@@ -13,3 +13,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 CMD ["python", "bot.py"]
 RUN apt-get install -y libjpeg-dev zlib1g-dev && \
     pip install --no-cache-dir pillow-simd
+RUN apt-get install -y \
+    tesseract-ocr \
+    tesseract-ocr-rus \
+    tesseract-ocr-eng \
+    libjpeg-dev \
+    zlib1g-dev && \
+    pip install --no-cache-dir pillow-simd
