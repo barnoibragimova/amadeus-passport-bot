@@ -4,6 +4,7 @@ import cv2
 import pytesseract
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
+from telegram.error import Conflict
 
 # Конфигурация
 BOT_TOKEN = "7921805686:AAH0AJrCC0Dd6Lvb5mc3CXI9dUda_n89Y0Y"
@@ -109,11 +110,8 @@ async def handle_passport_photo(update: Update, context: ContextTypes.DEFAULT_TY
         if os.path.exists(temp_image):
             os.remove(temp_image)
 
-def main():
+async def main():
     """Запуск бота"""
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(MessageHandler(filters.PHOTO, handle_passport_photo))
-    async def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.PHOTO, handle_passport_photo))
     
@@ -128,8 +126,7 @@ def main():
         print(f"⚠️ Ошибка: {e}. Остановка...")
     except Exception as e:
         print(f"Неизвестная ошибка: {e}")
-    print("Бот @Amadeus2bot запущен и готов к работе!")
-    app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+    asyncio.run(main())
