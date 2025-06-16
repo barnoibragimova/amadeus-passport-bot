@@ -113,7 +113,21 @@ def main():
     """Запуск бота"""
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.PHOTO, handle_passport_photo))
+    async def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(MessageHandler(filters.PHOTO, handle_passport_photo))
     
+    print("Бот @Amadeus2bot запущен и готов к работе!")
+    
+    try:
+        await app.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            close_loop=False  # Важно для Render
+        )
+    except Conflict as e:
+        print(f"⚠️ Ошибка: {e}. Остановка...")
+    except Exception as e:
+        print(f"Неизвестная ошибка: {e}")
     print("Бот @Amadeus2bot запущен и готов к работе!")
     app.run_polling()
 
