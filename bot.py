@@ -2,50 +2,62 @@ import os
 import re
 import cv2
 import pytesseract
-from telegram.ext import Updater, MessageHandler, filters
 from telegram import Update
-from telegram.ext import CallbackContext
-from dotenv import load_dotenv
+from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
-load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+# Конфигурация
+BOT_TOKEN = "7921805686:AAH0AJrCC0Dd6Lvb5mc3CXI9dUda_n89Y0Y"
+TESSERACT_CONFIG = r'--oem 3 --psm 6 -l eng+rus'
 
-def preprocess_image(image_path):
-    img = cv2.imread(image_path)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-    return thresh
-
-def extract_passport_data(image_path):
+async def enhance_image(image_path):
+    """Улучшение качества изображения"""
     try:
-        processed_img = preprocess_image(image_path)
-        text = pytesseract.image_to_string(
-            processed_img,
-            lang="eng+rus",
-            config="--psm 6 --oem 3"
-        )
-        lines = [line.strip() for line in text.split("\n") if line.strip()]
-        return lines[-2:] if len(lines) >= 2 else None
+        img = cv2.imread(image_path)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        return cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
     except Exception as e:
-        print(f"OCR Error: {e}")
+        print(f"Image enhancement failed: {e}")
         return None
 
-def format_for_amadeus(lines):
-    if not lines or len(lines) < 2:
-        return "❌ Неверный формат паспорта"
-    
+async def extract_text(image_path):
+    """Извлечение текста из изображения"""
     try:
-        # Парсинг первой строки (например: "UZB FA0421711 UZB 29NOV86 F")
-        line1 = re.split(r"\s+", lines[0])
-        country = line1[0] if len(line1) > 0 else "UZB"
-        dob = line1[3] if len(line1) > 3 else "01JAN00"
-        gender = line1[4] if len(line1) > 4 else "F"
+        processed_img = await enhance_image(image_path)
+        if processed_img is None:
+            return None
+        return pytesseract.image_to_string(processed_img, config=TESSERACT_CONFIG)
+    except Exception as e:
+        print(f"Text extraction failed: {e}")
+        return None
 
-        # Парсинг второй строки (например: "02JUL29 Ibragimova Barno")
-        line2 = re.split(r"\s+", lines[1])
-        expiry = line2[0] if len(line2) > 0 else "01JAN30"
-        surname = line2[1] if len(line2) > 1 else "SURNAME"
-        given_name = " ".join(line2[2:]) if len(line2) > 2 else "NAME"
+def parse_passport_data(text):
+    """Парсинг данных паспорта"""
+    if not text:
+        return None
+        
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
+    if len(lines) < 2:
+        return None
+        
+    return {
+        'line1': lines[-2],
+        'line2': lines[-1]
+    }
+
+def generate_amadeus_format(data):
+    """Генерация строки Amadeus"""
+    try:
+        # Парсинг первой строки (пример: "UZB FA0421711 UZB 29NOV86 F")
+        parts1 = re.split(r'\s+', data['line1'])
+        country = parts1[0] if len(parts1) > 0 else "UZB"
+        dob = parts1[3] if len(parts1) > 3 else "01JAN00"
+        gender = parts1[4] if len(parts1) > 4 else "F"
+
+        # Парсинг второй строки (пример: "02JUL29 IBragimova Barno")
+        parts2 = re.split(r'\s+', data['line2'], maxsplit=2)
+        expiry = parts2[0] if len(parts2) > 0 else "01JAN30"
+        surname = parts2[1] if len(parts2) > 1 else "SURNAME"
+        given_name = parts2[2] if len(parts2) > 2 else "NAME"
 
         return (
             f"SR DOCS YY HK1-P-{country}-FA0421711-"
@@ -53,38 +65,57 @@ def format_for_amadeus(lines):
             f"{surname.upper()}-{given_name.upper()}"
         )
     except Exception as e:
-        return f"❌ Ошибка форматирования: {str(e)}"
+        print(f"Amadeus formatting failed: {e}")
+        return None
 
-def handle_photo(update: Update, context: CallbackContext):
+async def handle_passport_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик фото паспорта"""
     try:
-        photo = update.message.photo[-1].get_file()
-        image_path = 'temp_passport.jpg'
-        photo.download(image_path)
+        # Скачивание фото
+        photo_file = await update.message.photo[-1].get_file()
+        temp_image = "temp_passport.jpg"
+        await photo_file.download_to_drive(temp_image)
         
-        lines = extract_passport_data(image_path)
-        if not lines:
-            update.message.reply_text("❌ Не удалось распознать паспорт")
+        # Извлечение текста
+        text = await extract_text(temp_image)
+        if not text:
+            await update.message.reply_text("❌ Не удалось прочитать паспорт. Попробуйте другое фото.")
             return
-
-        result = format_for_amadeus(lines)
-        update.message.reply_text(
-            f"✅ Распознанные данные:\n{' '.join(lines)}\n\n"
-            f"🔹 Формат Amadeus:\n{result}"
+            
+        # Парсинг данных
+        passport_data = parse_passport_data(text)
+        if not passport_data:
+            await update.message.reply_text("❌ Неверный формат паспорта. Убедитесь, что видны последние 2 строки.")
+            return
+            
+        # Генерация формата Amadeus
+        amadeus_format = generate_amadeus_format(passport_data)
+        if not amadeus_format:
+            await update.message.reply_text("❌ Ошибка обработки данных. Попробуйте еще раз.")
+            return
+            
+        # Отправка результата
+        await update.message.reply_text(
+            f"✅ Успешно распознано:\n\n"
+            f"Исходные данные:\n{passport_data['line1']}\n{passport_data['line2']}\n\n"
+            f"🔹 Формат Amadeus:\n{amadeus_format}"
         )
+        
     except Exception as e:
-        update.message.reply_text(f"⚠️ Ошибка: {str(e)}")
+        await update.message.reply_text(f"⚠️ Произошла ошибка: {str(e)}")
+        
     finally:
-        if os.path.exists(image_path):
-            os.remove(image_path)
+        # Удаление временного файла
+        if os.path.exists(temp_image):
+            os.remove(temp_image)
 
 def main():
-    updater = Updater(BOT_TOKEN)
-    dp = updater.dispatcher
-    dp.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    """Запуск бота"""
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(MessageHandler(filters.PHOTO, handle_passport_photo))
     
-    print("Бот запущен...")
-    updater.start_polling()
-    updater.idle()
+    print("Бот @Amadeus2bot запущен и готов к работе!")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
